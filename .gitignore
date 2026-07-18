@@ -219,8 +219,19 @@ __marimo__/
 
 # SyncSaves — config local por dispositivo (UUID + rutas)
 PC_Win/config.json
+PC_Win/dist/config.json
 
 # SyncSaves — build de PyInstaller
 PC_Win/build/
 PC_Win/dist/
 PC_Win/*.spec
+
+# Android
+Android/.gradle/
+Android/.idea/
+Android/local.properties
+Android/app/build/
+Android/build/
+Android/*.iml
+Android/app/*.iml
+Android/.cxx/
