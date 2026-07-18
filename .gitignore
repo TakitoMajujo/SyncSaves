@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SyncSaves — config local por dispositivo (UUID + rutas)
+PC_Win/config.json
+
+# SyncSaves — build de PyInstaller
+PC_Win/build/
+PC_Win/dist/
+PC_Win/*.spec
