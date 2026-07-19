@@ -29,10 +29,17 @@ class MainActivity : ComponentActivity() {
             try {
                 contentResolver.takePersistableUriPermission(
                     uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
                 )
             } catch (_: SecurityException) {
-                // Algunos providers no permiten persistencia; igual usamos la ruta resuelta.
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                } catch (_: SecurityException) {
+                    // Algunos providers no permiten persistencia; igual usamos el URI en esta sesión.
+                }
             }
             viewModel.setCustomRootFromTreeUri(uri)
         }

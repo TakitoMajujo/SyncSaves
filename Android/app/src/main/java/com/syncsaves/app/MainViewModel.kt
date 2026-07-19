@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 data class UiState(
     val deviceId: String = "",
@@ -37,7 +38,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         UiState(
             deviceId = prefs.deviceId,
             pcHost = prefs.pcHost,
-            customScanRoot = prefs.customScanRoot,
+            customScanRoot = prefs.customScanRoot.ifBlank {
+                prefs.customTreeUri.takeIf { it.isNotBlank() }?.let {
+                    MyBoyScanner.displayLabelForTreeUri(Uri.parse(it))
+                }.orEmpty()
+            },
         )
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -54,24 +59,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setCustomRootFromTreeUri(uri: Uri) {
-        val path = treeUriToPath(uri)
-        if (path.isNullOrBlank()) {
-            _state.update {
-                it.copy(statusMessage = "No se pudo resolver la carpeta elegida. Prueba otra ruta.")
-            }
-            return
-        }
-        prefs.customScanRoot = path
+        val label = MyBoyScanner.displayLabelForTreeUri(uri)
+        val path = treeUriToPath(uri).orEmpty()
+        prefs.customTreeUri = uri.toString()
+        prefs.customScanRoot = path.ifBlank { label }
         _state.update {
             it.copy(
-                customScanRoot = path,
-                statusMessage = "Carpeta del emulador: $path",
+                customScanRoot = path.ifBlank { label },
+                statusMessage = "Carpeta del emulador lista. Ahora pulsa Barrer saves My Boy!",
             )
         }
     }
 
     fun clearCustomRoot() {
         prefs.customScanRoot = ""
+        prefs.customTreeUri = ""
         _state.update {
             it.copy(
                 customScanRoot = "",
@@ -82,16 +84,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun scanMyBoySaves() {
         viewModelScope.launch {
-            _state.update { it.copy(isScanning = true, statusMessage = "Barriendo dispositivo…") }
-            val root = _state.value.customScanRoot.ifBlank { null }
+            _state.update { it.copy(isScanning = true, statusMessage = "Barriendo carpeta…") }
+            val treeUri = prefs.customTreeUri.ifBlank { null }
+            val path = prefs.customScanRoot.ifBlank { null }
             val found = withContext(Dispatchers.IO) {
-                MyBoyScanner.scan(customRootPath = root)
+                MyBoyScanner.scan(
+                    context = getApplication(),
+                    treeUriString = treeUri,
+                    fallbackPath = path,
+                )
             }
             _state.update {
                 it.copy(
                     isScanning = false,
                     saves = found,
-                    statusMessage = "Encontrados ${found.size} archivo(s) de guardado My Boy!",
+                    statusMessage = if (found.isEmpty()) {
+                        "0 archivos. ¿Elegiste la carpeta que contiene los .st0/.sav? " +
+                            "También concede acceso a todos los archivos si el sistema lo pide."
+                    } else {
+                        "Encontrados ${found.size} archivo(s) de guardado My Boy!"
+                    },
                 )
             }
         }
@@ -114,11 +126,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             _state.update { it.copy(isUploading = true, statusMessage = "Enviando a la PC…") }
+            val app = getApplication<Application>()
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     var ok = 0
                     for (save in current.saves) {
-                        syncClient.uploadSave(current.pcHost, current.deviceId, save).getOrThrow()
+                        syncClient.uploadSave(app, current.pcHost, current.deviceId, save).getOrThrow()
                         ok += 1
                     }
                     ok
@@ -146,25 +159,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun treeUriToPath(uri: Uri): String? {
-        // content://com.android.externalstorage.documents/tree/primary%3AMyBoy%2Fsave
-        if (DocumentsContract.isTreeUri(uri)) {
+        if (!DocumentsContract.isTreeUri(uri)) return null
+        return try {
             val docId = DocumentsContract.getTreeDocumentId(uri)
             val split = docId.split(":", limit = 2)
-            if (split.size == 2) {
-                val volume = split[0]
-                val relative = split[1]
-                return if (volume.equals("primary", ignoreCase = true)) {
-                    FilePath(Environment.getExternalStorageDirectory(), relative)
-                } else {
-                    "/storage/$volume/$relative"
-                }
+            if (split.size != 2) return null
+            val volume = split[0]
+            val relative = split[1]
+            if (volume.equals("primary", ignoreCase = true)) {
+                File(Environment.getExternalStorageDirectory(), relative).absolutePath
+            } else {
+                "/storage/$volume/$relative"
             }
+        } catch (_: Exception) {
+            null
         }
-        return uri.path
-    }
-
-    private fun FilePath(base: java.io.File, relative: String): String {
-        return java.io.File(base, relative).absolutePath
     }
 
     fun needsAllFilesAccess(): Boolean {
