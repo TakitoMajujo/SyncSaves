@@ -60,7 +60,7 @@ class SyncSavesApp(tk.Tk):
 
         ttk.Label(
             root,
-            text="En Android escribe este código para autorizar el envío de saves.",
+            text="En Android escribe este código para autorizar sync (enviar y recibir saves).",
             style="Hint.TLabel",
             wraplength=500,
         ).pack(anchor=tk.W, pady=(0, 20))

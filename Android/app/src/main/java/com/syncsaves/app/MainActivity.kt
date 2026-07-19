@@ -63,6 +63,7 @@ class MainActivity : ComponentActivity() {
                     onRequestStoragePermission = ::ensureStorageAccess,
                     onScan = viewModel::scanMyBoySaves,
                     onUpload = viewModel::uploadFoundSaves,
+                    onPullNewer = viewModel::pullNewerFromPc,
                 )
             }
         }
