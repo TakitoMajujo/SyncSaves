@@ -52,6 +52,7 @@ fun MainScreen(
     onRequestStoragePermission: () -> Unit,
     onScan: () -> Unit,
     onUpload: () -> Unit,
+    onPullNewer: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -66,7 +67,7 @@ fun MainScreen(
             fontWeight = FontWeight.Bold,
         )
         Text(
-            text = "My Boy! → PC (red local)",
+            text = "My Boy! ↔ PC (red local)",
             color = Muted,
             fontSize = 14.sp,
             modifier = Modifier.padding(top = 4.dp, bottom = 20.dp),
@@ -144,12 +145,14 @@ fun MainScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        val busy = state.isScanning || state.isUploading || state.isDownloading
+
         Button(
             onClick = {
                 onRequestStoragePermission()
                 onScan()
             },
-            enabled = !state.isScanning && !state.isUploading,
+            enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Bg),
         ) {
@@ -168,7 +171,7 @@ fun MainScreen(
 
         Button(
             onClick = onUpload,
-            enabled = !state.isScanning && !state.isUploading && state.saves.isNotEmpty(),
+            enabled = !busy && state.saves.isNotEmpty(),
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155), contentColor = OnBg),
         ) {
@@ -181,6 +184,26 @@ fun MainScreen(
                 Spacer(modifier = Modifier.width(8.dp))
             }
             Text("Enviar encontrados a la PC")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // PC más nueva → reemplaza el archivo del móvil
+        Button(
+            onClick = onPullNewer,
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F766E), contentColor = OnBg),
+        ) {
+            if (state.isDownloading) {
+                CircularProgressIndicator(
+                    color = OnBg,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Text("PC más nueva → reemplazar en el móvil")
         }
 
         Text(

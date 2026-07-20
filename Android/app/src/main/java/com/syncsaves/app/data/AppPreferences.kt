@@ -19,10 +19,15 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_CUSTOM_ROOT, "") ?: ""
         set(value) = prefs.edit().putString(KEY_CUSTOM_ROOT, value).apply()
 
+    var customTreeUri: String
+        get() = prefs.getString(KEY_CUSTOM_TREE_URI, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_CUSTOM_TREE_URI, value).apply()
+
     companion object {
         private const val PREFS_NAME = "syncsaves"
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_PC_HOST = "pc_host"
         private const val KEY_CUSTOM_ROOT = "custom_scan_root"
+        private const val KEY_CUSTOM_TREE_URI = "custom_tree_uri"
     }
 }

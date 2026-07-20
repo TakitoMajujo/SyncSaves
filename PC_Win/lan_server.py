@@ -1,14 +1,15 @@
-"""Servidor HTTP local para recibir saves desde Android."""
+"""Servidor HTTP local para sincronizar saves con Android."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 from config_manager import is_valid_device_id, load_config
 
@@ -22,7 +23,7 @@ def _safe_filename(name: str) -> str:
 
 
 class SyncHandler(BaseHTTPRequestHandler):
-    server_version = "SyncSaves/0.1"
+    server_version = "SyncSaves/0.2"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         if self.server.on_log:
@@ -36,8 +37,29 @@ class SyncHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _check_device(self, config: dict) -> bool:
+        expected = str(config.get("device_id", "")).upper()
+        provided = (self.headers.get("X-Device-Id") or "").strip().upper()
+        if not is_valid_device_id(expected):
+            self._json(500, {"ok": False, "error": "pc_device_id_invalid"})
+            return False
+        if provided != expected:
+            self._json(403, {"ok": False, "error": "device_id_mismatch"})
+            return False
+        return True
+
+    def _saves_dir(self, config: dict) -> Path | None:
+        folder = (config.get("saves_folder") or "").strip()
+        if not folder:
+            self._json(400, {"ok": False, "error": "saves_folder_not_configured"})
+            return None
+        return Path(folder)
+
     def do_GET(self) -> None:  # noqa: N802
-        if self.path.rstrip("/") == "/ping":
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        if path == "/ping":
             config = load_config()
             self._json(
                 200,
@@ -45,9 +67,67 @@ class SyncHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "device_id": config.get("device_id"),
                     "saves_folder": config.get("saves_folder") or "",
+                    "api_version": 2,
+                    "features": ["upload", "list", "download"],
                 },
             )
             return
+
+        if path == "/list":
+            config = load_config()
+            if not self._check_device(config):
+                return
+            target_dir = self._saves_dir(config)
+            if target_dir is None:
+                return
+            files: list[dict] = []
+            if target_dir.is_dir():
+                for entry in sorted(target_dir.iterdir(), key=lambda p: p.name.lower()):
+                    if not entry.is_file():
+                        continue
+                    try:
+                        stat = entry.stat()
+                    except OSError:
+                        continue
+                    files.append(
+                        {
+                            "name": entry.name,
+                            "size": stat.st_size,
+                            "mtime_ms": int(stat.st_mtime * 1000),
+                        }
+                    )
+            self._json(200, {"ok": True, "files": files})
+            return
+
+        if path == "/download":
+            config = load_config()
+            if not self._check_device(config):
+                return
+            target_dir = self._saves_dir(config)
+            if target_dir is None:
+                return
+            query = parse_qs(parsed.query)
+            raw_name = (query.get("name") or [""])[0]
+            filename = _safe_filename(raw_name)
+            source = target_dir / filename
+            if not source.is_file():
+                self._json(404, {"ok": False, "error": "file_not_found"})
+                return
+            try:
+                data = source.read_bytes()
+                mtime_ms = int(source.stat().st_mtime * 1000)
+            except OSError as exc:
+                self._json(500, {"ok": False, "error": f"read_failed: {exc}"})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("X-Filename", filename)
+            self.send_header("X-Last-Modified", str(mtime_ms))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         self._json(404, {"ok": False, "error": "not_found"})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -56,23 +136,14 @@ class SyncHandler(BaseHTTPRequestHandler):
             return
 
         config = load_config()
-        expected = str(config.get("device_id", "")).upper()
-        provided = (self.headers.get("X-Device-Id") or "").strip().upper()
+        if not self._check_device(config):
+            return
         filename = _safe_filename(self.headers.get("X-Filename") or "save.bin")
 
-        if not is_valid_device_id(expected):
-            self._json(500, {"ok": False, "error": "pc_device_id_invalid"})
-            return
-        if provided != expected:
-            self._json(403, {"ok": False, "error": "device_id_mismatch"})
+        target_dir = self._saves_dir(config)
+        if target_dir is None:
             return
 
-        folder = (config.get("saves_folder") or "").strip()
-        if not folder:
-            self._json(400, {"ok": False, "error": "saves_folder_not_configured"})
-            return
-
-        target_dir = Path(folder)
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -91,6 +162,14 @@ class SyncHandler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._json(500, {"ok": False, "error": f"write_failed: {exc}"})
             return
+
+        mtime_header = (self.headers.get("X-Last-Modified") or "").strip()
+        if mtime_header:
+            try:
+                mtime_sec = int(mtime_header) / 1000.0
+                os.utime(destination, (mtime_sec, mtime_sec))
+            except (OSError, ValueError):
+                pass
 
         if self.server.on_upload:
             self.server.on_upload(str(destination))
