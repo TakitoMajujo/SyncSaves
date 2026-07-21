@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import socket
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from config_manager import load_config, set_saves_folder
 from lan_server import LanSyncServer
+from recalbox_sync import SyncResult, sync_saves_to_recalbox
 
 
 def _local_ip() -> str:
@@ -26,11 +28,12 @@ class SyncSavesApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("SyncSaves")
-        self.minsize(560, 420)
+        self.minsize(560, 460)
         self.configure(bg="#1a1d23")
 
         self._config = load_config()
         self._server = LanSyncServer(port=self._config.get("server_port"))
+        self._recalbox_busy = False
         self._build_ui()
         self._refresh_labels()
         self._start_server()
@@ -99,6 +102,13 @@ class SyncSavesApp(tk.Tk):
             command=self._copy_code,
         ).pack(side=tk.LEFT, padx=(10, 0))
 
+        ttk.Button(
+            actions,
+            text="Sincronizar a Recalbox",
+            style="Action.TButton",
+            command=self._sync_recalbox,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
     def _refresh_labels(self) -> None:
         self.code_var.set(self._config.get("device_id", ""))
         folder = self._config.get("saves_folder") or "(sin configurar)"
@@ -138,6 +148,73 @@ class SyncSavesApp(tk.Tk):
         self.clipboard_clear()
         self.clipboard_append(device_id)
         messagebox.showinfo("SyncSaves", "Código copiado al portapapeles.")
+
+    def _sync_recalbox(self) -> None:
+        if self._recalbox_busy:
+            return
+        folder = (self._config.get("saves_folder") or "").strip()
+        if not folder:
+            messagebox.showwarning(
+                "SyncSaves",
+                "Configura primero la carpeta de guardados.",
+            )
+            return
+
+        self._recalbox_busy = True
+        self.status_var.set("Sincronizando con Recalbox…")
+
+        def worker() -> None:
+            try:
+                result = sync_saves_to_recalbox(folder)
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)
+                self.after(0, lambda e=err: self._on_recalbox_done(error=e))
+                return
+            self.after(0, lambda r=result: self._on_recalbox_done(result=r))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_recalbox_done(
+        self,
+        result: SyncResult | None = None,
+        error: str | None = None,
+    ) -> None:
+        self._recalbox_busy = False
+        if error:
+            self.status_var.set(f"Recalbox: error — {error}")
+            messagebox.showerror("Sincronizar a Recalbox", error)
+            return
+
+        assert result is not None
+        self.status_var.set(f"Recalbox: {result.summary}")
+
+        lines = [result.summary, ""]
+        if result.to_recalbox:
+            lines.append("PC → Recalbox:")
+            lines.extend(f"  • {item}" for item in result.to_recalbox[:15])
+            if len(result.to_recalbox) > 15:
+                lines.append(f"  … y {len(result.to_recalbox) - 15} más")
+        if result.from_recalbox:
+            lines.append("")
+            lines.append("Recalbox → PC:")
+            lines.extend(f"  • {item}" for item in result.from_recalbox[:15])
+            if len(result.from_recalbox) > 15:
+                lines.append(f"  … y {len(result.from_recalbox) - 15} más")
+        if result.unmatched:
+            lines.append("")
+            lines.append("Sin ROM coincidente:")
+            lines.extend(f"  • {name}" for name in result.unmatched[:10])
+            if len(result.unmatched) > 10:
+                lines.append(f"  … y {len(result.unmatched) - 10} más")
+        if result.errors:
+            lines.append("")
+            lines.append("Errores:")
+            lines.extend(f"  • {err}" for err in result.errors[:10])
+
+        if result.errors and not result.copied:
+            messagebox.showerror("Sincronizar a Recalbox", "\n".join(lines))
+        else:
+            messagebox.showinfo("Sincronizar a Recalbox", "\n".join(lines))
 
     def _on_close(self) -> None:
         self._server.stop()

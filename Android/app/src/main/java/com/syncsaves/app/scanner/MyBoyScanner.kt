@@ -17,7 +17,7 @@ data class SaveFile(
 )
 
 object MyBoyScanner {
-    private val FIXED_EXTENSIONS: Set<String> = setOf("sav", "dss", "state")
+    private val FIXED_EXTENSIONS: Set<String> = setOf("sav", "srm", "dss", "state")
     private val SAVE_STATE_PATTERN = Regex("^st\\d+$")
 
     private val preferredRelativeRoots = listOf(

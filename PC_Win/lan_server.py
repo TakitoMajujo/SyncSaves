@@ -16,10 +16,49 @@ from config_manager import is_valid_device_id, load_config
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._\- ()\[\]]+")
 
 
+def _basename(name: str) -> str:
+    """Solo el nombre del archivo (evita path traversal), sin alterar caracteres."""
+    return Path(unquote(name)).name.strip() or "save.bin"
+
+
 def _safe_filename(name: str) -> str:
-    cleaned = Path(unquote(name)).name.strip()
-    cleaned = _SAFE_NAME.sub("_", cleaned)
+    """Nombre seguro para crear archivos nuevos en upload."""
+    cleaned = _SAFE_NAME.sub("_", _basename(name))
     return cleaned or "save.bin"
+
+
+def _resolve_existing_file(target_dir: Path, requested: str) -> Path | None:
+    """Encuentra un archivo existente por el nombre pedido (lista → descarga)."""
+    if not target_dir.is_dir():
+        return None
+
+    exact = _basename(requested)
+    candidate = target_dir / exact
+    if candidate.is_file():
+        return candidate
+
+    # Misma ruta tras sanitizar (p. ej. subido antes con reglas viejas).
+    sanitized = _safe_filename(requested)
+    candidate = target_dir / sanitized
+    if candidate.is_file():
+        return candidate
+
+    # Coincidencia case-insensitive / tras sanitizar cada entrada.
+    wanted_exact = exact.casefold()
+    wanted_safe = sanitized.casefold()
+    try:
+        for entry in target_dir.iterdir():
+            if not entry.is_file():
+                continue
+            if entry.name.casefold() == wanted_exact:
+                return entry
+            if _safe_filename(entry.name).casefold() == wanted_safe:
+                return entry
+            if entry.name.casefold() == wanted_safe:
+                return entry
+    except OSError:
+        return None
+    return None
 
 
 class SyncHandler(BaseHTTPRequestHandler):
@@ -106,12 +145,14 @@ class SyncHandler(BaseHTTPRequestHandler):
             target_dir = self._saves_dir(config)
             if target_dir is None:
                 return
-            query = parse_qs(parsed.query)
+            query = parse_qs(parsed.query, keep_blank_values=True)
             raw_name = (query.get("name") or [""])[0]
-            filename = _safe_filename(raw_name)
-            source = target_dir / filename
-            if not source.is_file():
-                self._json(404, {"ok": False, "error": "file_not_found"})
+            # También aceptar nombre por header (evita rarezas de query encoding).
+            if not raw_name.strip():
+                raw_name = self.headers.get("X-Filename") or ""
+            source = _resolve_existing_file(target_dir, raw_name)
+            if source is None:
+                self._json(404, {"ok": False, "error": "file_not_found", "name": _basename(raw_name)})
                 return
             try:
                 data = source.read_bytes()
@@ -122,7 +163,7 @@ class SyncHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("X-Filename", filename)
+            self.send_header("X-Filename", source.name)
             self.send_header("X-Last-Modified", str(mtime_ms))
             self.end_headers()
             self.wfile.write(data)

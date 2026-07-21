@@ -203,7 +203,7 @@ fun MainScreen(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
             }
-            Text("PC más nueva → reemplazar en el móvil")
+            Text("Sincronizar con PC")
         }
 
         Text(

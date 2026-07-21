@@ -2,6 +2,7 @@ package com.syncsaves.app.network
 
 import android.content.Context
 import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
 import com.syncsaves.app.scanner.SaveFile
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -128,6 +129,7 @@ class PcSyncClient(
         val request = Request.Builder()
             .url(url)
             .addHeader("X-Device-Id", deviceId.trim().uppercase())
+            .addHeader("X-Filename", filename)
             .get()
             .build()
 
@@ -142,19 +144,34 @@ class PcSyncClient(
         }
     }
 
+    fun readLocalBytes(context: Context, save: SaveFile): ByteArray {
+        val contentUri = save.contentUri
+        if (!contentUri.isNullOrBlank()) {
+            val stream = context.contentResolver.openInputStream(Uri.parse(contentUri))
+                ?: error("No se pudo leer: ${save.name}")
+            return stream.use { it.readBytes() }
+        }
+        val file = File(save.absolutePath)
+        require(file.isFile) { "No existe: ${save.absolutePath}" }
+        return file.readBytes()
+    }
+
     fun writeLocalSave(
         context: Context,
         save: SaveFile,
         bytes: ByteArray,
         lastModified: Long,
-    ) {
+    ): SaveFile {
         val contentUri = save.contentUri
         if (!contentUri.isNullOrBlank()) {
             val uri = Uri.parse(contentUri)
             val stream = context.contentResolver.openOutputStream(uri, "wt")
                 ?: error("No se pudo escribir: ${save.name}")
             stream.use { it.write(bytes) }
-            return
+            return save.copy(
+                sizeBytes = bytes.size.toLong(),
+                lastModified = lastModified.takeIf { it > 0 } ?: save.lastModified,
+            )
         }
 
         val file = File(save.absolutePath)
@@ -165,6 +182,82 @@ class PcSyncClient(
         if (lastModified > 0L) {
             file.setLastModified(lastModified)
         }
+        return save.copy(
+            sizeBytes = bytes.size.toLong(),
+            lastModified = if (lastModified > 0L) lastModified else file.lastModified(),
+        )
+    }
+
+    fun createLocalSave(
+        context: Context,
+        treeUriString: String?,
+        fallbackPath: String?,
+        filename: String,
+        bytes: ByteArray,
+        lastModified: Long,
+    ): SaveFile {
+        val treeUri = treeUriString?.takeIf { it.isNotBlank() }?.let(Uri::parse)
+        if (treeUri != null) {
+            val root = DocumentFile.fromTreeUri(context, treeUri)
+                ?: error("No se pudo acceder a la carpeta del emulador.")
+            val existing = findDocumentByName(root, filename)
+            val target = existing ?: root.createFile("application/octet-stream", filename)
+                ?: error("No se pudo crear: $filename")
+            val stream = context.contentResolver.openOutputStream(target.uri, "wt")
+                ?: error("No se pudo escribir: $filename")
+            stream.use { it.write(bytes) }
+            return SaveFile(
+                name = filename,
+                absolutePath = target.uri.toString(),
+                sizeBytes = bytes.size.toLong(),
+                lastModified = lastModified.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                contentUri = target.uri.toString(),
+            )
+        }
+
+        val directory = resolveFileDirectory(fallbackPath)
+            ?: error("Elige la carpeta del emulador antes de bajar saves nuevos de la PC.")
+        if (!directory.exists()) {
+            require(directory.mkdirs()) { "No se pudo crear: ${directory.absolutePath}" }
+        }
+        val file = File(directory, filename)
+        file.writeBytes(bytes)
+        if (lastModified > 0L) {
+            file.setLastModified(lastModified)
+        }
+        return SaveFile(
+            name = filename,
+            absolutePath = file.absolutePath,
+            sizeBytes = file.length(),
+            lastModified = file.lastModified(),
+            contentUri = null,
+        )
+    }
+
+    private fun resolveFileDirectory(fallbackPath: String?): File? {
+        fallbackPath
+            ?.takeIf { it.isNotBlank() }
+            ?.let { File(it) }
+            ?.let { candidate ->
+                return when {
+                    candidate.isDirectory -> candidate
+                    candidate.isFile -> candidate.parentFile
+                    else -> candidate.parentFile ?: candidate
+                }
+            }
+        return null
+    }
+
+    private fun findDocumentByName(root: DocumentFile, filename: String): DocumentFile? {
+        if (root.isFile && root.name == filename) return root
+        if (!root.isDirectory) return null
+        for (child in root.listFiles()) {
+            if (child.isFile && child.name == filename) return child
+            if (child.isDirectory) {
+                findDocumentByName(child, filename)?.let { return it }
+            }
+        }
+        return null
     }
 
     private fun buildBody(context: Context, save: SaveFile): RequestBody {
