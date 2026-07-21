@@ -158,26 +158,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             _state.update {
-                it.copy(isDownloading = true, statusMessage = "Preparando comparación con la PC…")
+                it.copy(isDownloading = true, statusMessage = "Sincronizando con la PC…")
             }
             val app = getApplication<Application>()
             val result = withContext(Dispatchers.IO) {
                 runCatching {
+                    val treeUri = prefs.customTreeUri.ifBlank { null }
+                    val path = prefs.customScanRoot.ifBlank { null }
                     var locals = current.saves
                     if (locals.isEmpty()) {
-                        val treeUri = prefs.customTreeUri.ifBlank { null }
-                        val path = prefs.customScanRoot.ifBlank { null }
                         locals = MyBoyScanner.scan(
                             context = app,
                             treeUriString = treeUri,
                             fallbackPath = path,
                         )
                     }
-                    if (locals.isEmpty()) {
-                        error("No hay archivos en el móvil. Elige la carpeta del emulador y barre primero.")
-                    }
 
-                    // Comprueba que la PC tenga API v2 (/list + /download)
                     val ping = syncClient.ping(current.pcHost).getOrThrow()
                     if (ping.optInt("api_version", 1) < 2) {
                         error(
@@ -189,54 +185,155 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val remote = syncClient
                         .listRemoteSaves(current.pcHost, current.deviceId)
                         .getOrThrow()
-                        .associateBy { it.name.lowercase() }
 
-                    var updated = 0
-                    var checked = 0
-                    val updatedNames = mutableListOf<String>()
-                    val refreshed = locals.map { local ->
-                        val pc = remote[local.name.lowercase()] ?: return@map local
-                        checked += 1
-                        // PC más reciente → reemplazar en el móvil
-                        if (pc.lastModified <= local.lastModified) return@map local
+                    val localMap = locals.associateBy { it.name.lowercase() }.toMutableMap()
+                    val remoteMap = remote.associateBy { it.name.lowercase() }
+                    val allNames = (localMap.keys + remoteMap.keys).sorted()
 
-                        val downloaded = syncClient
-                            .downloadSave(current.pcHost, current.deviceId, pc.name)
-                            .getOrThrow()
-                        val mtime = downloaded.lastModified.takeIf { it > 0 } ?: pc.lastModified
-                        syncClient.writeLocalSave(
-                            context = app,
-                            save = local,
-                            bytes = downloaded.bytes,
-                            lastModified = mtime,
-                        )
-                        updated += 1
-                        updatedNames += local.name
-                        local.copy(
-                            sizeBytes = downloaded.bytes.size.toLong(),
-                            lastModified = mtime,
-                        )
+                    var toPc = 0
+                    var fromPc = 0
+                    var upToDate = 0
+                    val toPcNames = mutableListOf<String>()
+                    val fromPcNames = mutableListOf<String>()
+
+                    for (key in allNames) {
+                        val local = localMap[key]
+                        val pc = remoteMap[key]
+
+                        when {
+                            local != null && pc == null -> {
+                                syncClient
+                                    .uploadSave(app, current.pcHost, current.deviceId, local)
+                                    .getOrThrow()
+                                toPc += 1
+                                toPcNames += local.name
+                            }
+
+                            local == null && pc != null -> {
+                                val downloaded = syncClient
+                                    .downloadSave(current.pcHost, current.deviceId, pc.name)
+                                    .getOrThrow()
+                                val mtime = downloaded.lastModified.takeIf { it > 0 } ?: pc.lastModified
+                                val created = syncClient.createLocalSave(
+                                    context = app,
+                                    treeUriString = treeUri,
+                                    fallbackPath = path,
+                                    filename = pc.name,
+                                    bytes = downloaded.bytes,
+                                    lastModified = mtime,
+                                )
+                                localMap[key] = created
+                                fromPc += 1
+                                fromPcNames += pc.name
+                            }
+
+                            local != null && pc != null -> {
+                                if (local.sizeBytes == pc.sizeBytes) {
+                                    val localBytes = syncClient.readLocalBytes(app, local)
+                                    val downloaded = syncClient
+                                        .downloadSave(current.pcHost, current.deviceId, pc.name)
+                                        .getOrThrow()
+                                    if (localBytes.contentEquals(downloaded.bytes)) {
+                                        upToDate += 1
+                                        continue
+                                    }
+                                    val mtime = downloaded.lastModified.takeIf { it > 0 } ?: pc.lastModified
+                                    when {
+                                        pc.lastModified > local.lastModified -> {
+                                            val updated = syncClient.writeLocalSave(
+                                                context = app,
+                                                save = local,
+                                                bytes = downloaded.bytes,
+                                                lastModified = mtime,
+                                            )
+                                            localMap[key] = updated
+                                            fromPc += 1
+                                            fromPcNames += local.name
+                                        }
+
+                                        local.lastModified > pc.lastModified -> {
+                                            syncClient
+                                                .uploadSave(app, current.pcHost, current.deviceId, local)
+                                                .getOrThrow()
+                                            toPc += 1
+                                            toPcNames += local.name
+                                        }
+
+                                        else -> {
+                                            val updated = syncClient.writeLocalSave(
+                                                context = app,
+                                                save = local,
+                                                bytes = downloaded.bytes,
+                                                lastModified = mtime,
+                                            )
+                                            localMap[key] = updated
+                                            fromPc += 1
+                                            fromPcNames += local.name
+                                        }
+                                    }
+                                } else when {
+                                    pc.lastModified > local.lastModified -> {
+                                        val downloaded = syncClient
+                                            .downloadSave(current.pcHost, current.deviceId, pc.name)
+                                            .getOrThrow()
+                                        val mtime = downloaded.lastModified.takeIf { it > 0 } ?: pc.lastModified
+                                        val updated = syncClient.writeLocalSave(
+                                            context = app,
+                                            save = local,
+                                            bytes = downloaded.bytes,
+                                            lastModified = mtime,
+                                        )
+                                        localMap[key] = updated
+                                        fromPc += 1
+                                        fromPcNames += local.name
+                                    }
+
+                                    local.lastModified > pc.lastModified -> {
+                                        syncClient
+                                            .uploadSave(app, current.pcHost, current.deviceId, local)
+                                            .getOrThrow()
+                                        toPc += 1
+                                        toPcNames += local.name
+                                    }
+
+                                    else -> {
+                                        val downloaded = syncClient
+                                            .downloadSave(current.pcHost, current.deviceId, pc.name)
+                                            .getOrThrow()
+                                        val mtime = downloaded.lastModified.takeIf { it > 0 } ?: pc.lastModified
+                                        val updated = syncClient.writeLocalSave(
+                                            context = app,
+                                            save = local,
+                                            bytes = downloaded.bytes,
+                                            lastModified = mtime,
+                                        )
+                                        localMap[key] = updated
+                                        fromPc += 1
+                                        fromPcNames += local.name
+                                    }
+                                }
+                            }
+                        }
                     }
-                    PullResult(updated, checked, refreshed, updatedNames)
+
+                    SyncResult(
+                        toPc = toPc,
+                        fromPc = fromPc,
+                        upToDate = upToDate,
+                        refreshed = localMap.values.sortedBy { it.name.lowercase() },
+                        toPcNames = toPcNames,
+                        fromPcNames = fromPcNames,
+                        totalRemote = remote.size,
+                    )
                 }
             }
             result.fold(
-                onSuccess = { pull ->
+                onSuccess = { sync ->
                     _state.update {
                         it.copy(
                             isDownloading = false,
-                            saves = pull.refreshed,
-                            statusMessage = when {
-                                pull.checked == 0 ->
-                                    "Ningún archivo del móvil coincide por nombre con los de la PC."
-                                pull.updated == 0 ->
-                                    "Todo al día. ${pull.checked} archivo(s) en ambos lados; " +
-                                        "ninguno de la PC es más nuevo."
-                                else ->
-                                    "Reemplazados en el móvil ${pull.updated} archivo(s) " +
-                                        "con la versión más nueva de la PC: " +
-                                        pull.updatedNames.joinToString(", ")
-                            },
+                            saves = sync.refreshed,
+                            statusMessage = buildSyncMessage(sync),
                         )
                     }
                 },
@@ -244,7 +341,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _state.update {
                         it.copy(
                             isDownloading = false,
-                            statusMessage = "Error al verificar/actualizar: ${error.message}",
+                            statusMessage = "Error al sincronizar: ${error.message}",
                         )
                     }
                 },
@@ -252,12 +349,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private data class PullResult(
-        val updated: Int,
-        val checked: Int,
+    private data class SyncResult(
+        val toPc: Int,
+        val fromPc: Int,
+        val upToDate: Int,
         val refreshed: List<SaveFile>,
-        val updatedNames: List<String>,
+        val toPcNames: List<String>,
+        val fromPcNames: List<String>,
+        val totalRemote: Int,
     )
+
+    private fun buildSyncMessage(sync: SyncResult): String {
+        val parts = mutableListOf<String>()
+        if (sync.fromPc > 0) {
+            val names = sync.fromPcNames.take(3).joinToString()
+            val suffix = if (sync.fromPcNames.size > 3) ", …" else ""
+            parts += "PC→móvil: ${sync.fromPc} ($names$suffix)"
+        }
+        if (sync.toPc > 0) {
+            val names = sync.toPcNames.take(3).joinToString()
+            val suffix = if (sync.toPcNames.size > 3) ", …" else ""
+            parts += "móvil→PC: ${sync.toPc} ($names$suffix)"
+        }
+        if (sync.upToDate > 0) {
+            parts += "Al día: ${sync.upToDate}"
+        }
+        if (parts.isEmpty()) {
+            return if (sync.totalRemote == 0) {
+                "La PC no tiene saves en su carpeta."
+            } else {
+                "Nada que sincronizar (${sync.totalRemote} en la PC)."
+            }
+        }
+        return parts.joinToString(" · ")
+    }
 
     private fun validateConnection(current: UiState): Boolean {
         if (current.deviceId.length != 8) {

@@ -46,6 +46,22 @@ android {
     }
 }
 
+val distDir = rootProject.layout.projectDirectory.dir("dist")
+
+fun registerCopyApkTask(variantName: String) {
+    val capitalized = variantName.replaceFirstChar { it.uppercase() }
+    tasks.register<Copy>("copy${capitalized}ApkToDist") {
+        dependsOn("assemble$capitalized")
+        from(layout.buildDirectory.dir("outputs/apk/$variantName"))
+        include("*.apk")
+        into(distDir)
+        rename { "SyncSaves.apk" }
+    }
+}
+
+registerCopyApkTask("debug")
+registerCopyApkTask("release")
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
     implementation(composeBom)
